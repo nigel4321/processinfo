@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import time
 
 
@@ -20,6 +21,7 @@ class ProcessInfo(object):
 
     def __init__(self, pid=None, window=0.3):
         self.CLOCKTICK = os.sysconf('SC_CLK_TCK')
+        self.PAGESIZE = os.sysconf('SC_PAGESIZE')
         self.window = window
         if not pid:
             self.pid = str(os.getpid())
@@ -29,17 +31,37 @@ class ProcessInfo(object):
 
     def _gettime(self):
         try:
-            cf = open("/proc/" + self.pid + "/stat", "r")
+            with open("/proc/%s/stat" % self.pid, "r") as cf:
+                data = cf.readline()
         except Exception as err:
-            print("Failed: %s\n" % str(err))
+            sys.stderr.write("Failed: %s\n" % err.message)
             raise
-        data = cf.readline()
-        cf.close()
         data = data.split()
-        # print data[13]
         ttime = int(data[13]) + int(data[14]) + int(data[15]) + int(data[16])
         stime = time.time()
         return (ttime, stime)
+
+    def memstats(self):
+        """
+        Returns memory usage information in bytes as a hash keyed by memory type.
+        """
+
+        mempath = "/proc/%s/statm" % self.pid
+        try:
+            with open(mempath, "r") as memf:
+                oneline = memf.readline()
+                oneline = oneline.split()
+        except Exception as err:
+            self.stderr.write(mempath + " :%s\n" % err.message)
+            raise
+        total = int(oneline[0])
+        resident = int(oneline[1])
+        shared = int(oneline[2])
+        total *= self.PAGESIZE
+        resident *= self.PAGESIZE
+        shared *= self.PAGESIZE
+        data = {'total': total, 'resident': resident, 'shared': shared}
+        return data
 
     def cpuuse(self):
         """
@@ -54,6 +76,38 @@ class ProcessInfo(object):
         # print t, " ", s
         val = (t / s) * 100
         return val
+
+    def iostats(self):
+        """
+        Returns io information as a hash keyed by io type
+            rchar: characters read
+            wchar: characters written
+            syscr: read syscalls
+            syscr: read syscalls
+            read_bytes: bytes read
+            write_bytes: bytes writte
+            cancelled_write_bytes: this field represents the number of bytes which
+                                 this process caused to not happen, by truncating
+                                 pagecache.
+        """
+        data = {}
+        iopath = "/proc/%s/io" % self.pid
+        try:
+            iof = open(iopath, "r")
+        except Exception as err:
+            sys.stderr.write(iopath + " :%s\n" % err.message)
+            return None
+        oneline = iof.readline()
+        oneline = oneline.rstrip()
+        while oneline:
+            l = oneline.split(':')
+            if l[0] not in data:
+                data[l[0]] = int(l[1])
+            else:
+                data[l[0]] += int(l[1])
+            oneline = iof.readline()
+            oneline = oneline.rstrip()
+        return data
 
     def fdcount(self):
         """
@@ -77,15 +131,15 @@ class ProcessInfo(object):
             tcpf = open("/proc/net/tcp", "r")
             udpf = open("/proc/net/udp", "r")
             unixf = open("/proc/net/unix", "r")
-        except Exception, err:
-            print("getconns %s\n" % str(err))
+        except Exception as err:
+            sys.stderr.write("getconns %s\n" % err.message)
             raise
         ip6 = True
         try:
             tcp6f = open("/proc/net/tcp6", "r")
             udp6f = open("/proc/net/udp6", "r")
-        except Exception, err:
-            print("Error getting ipv6 info %s\n" % str(err))
+        except Exception as err:
+            sys.stderr.write("Error getting ipv6 info %s\n" % err.message)
             ip6 = False
         allconns = self._ConnTable()
         for onel in tcpf:
@@ -106,9 +160,9 @@ class ProcessInfo(object):
                 allconns.udp6inodes[onel[9]] = None
         return allconns
 
-    def socketcount(self):
+    def netstats(self):
         """
-        Returns a hash keyed by tcp, tcp6, usd, udp6 and unix
+        Returns a hash keyed by tcp, tcp6, udp, udp6 and unix
         The hash contains the number of sockets for each item
         """
         sockstat = dict()
@@ -117,15 +171,15 @@ class ProcessInfo(object):
         try:
             fds = os.listdir("/proc/%s/fd" % self.pid)
         except Exception as err:
-            print("Error reading  %s\n" % str(err))
+            sys.stderr.write("Error reading  %s\n" % str(err))
             raise
         sck = []
         allconns = self._getallconns()
         for f in fds:
             try:
                 s = os.readlink("/proc/%s/fd/%s" % (self.pid, f))
-            except Exception, err:
-                print("getsocktype %s" % str(err))
+            except Exception as err:
+                sys.stderr.write("getsocktype %s" % err.message)
                 continue
             if re.match('socket', s):
                 sck.append(re.search('[0-9]+', s).group(0))
